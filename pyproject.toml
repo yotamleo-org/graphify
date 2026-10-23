@@ -151,7 +151,7 @@ dev = [
 ]
 
 [tool.uv]
-environments = ["python_full_version >= '3.11'"]
+environments = ["python_full_version >= '3.11' and sys_platform != 'emscripten'"]
 # Security floors for transitive dependencies, including optional extras.
 constraint-dependencies = [
     "anyio>=4.14.2",
@@ -159,6 +159,7 @@ constraint-dependencies = [
     "fsspec>=2026.6.0",
     "mcp>=1.30.0,<2",
     "pyjwt>=2.15.0",
+    "soupsieve>=2.8.4,<3",
     "urllib3>=2.8.0",
 ]
 # Install via: uv tool install graphifyy
