@@ -241,6 +241,22 @@ def test_same_file_semantic_fold_is_not_lost():
     assert folded == {"old_tick": "new_tick"}
 
 
+def test_same_file_semantic_fold_needs_a_located_twin():
+    # Pass 1 makes only a located semantic node canonical: with no location on
+    # either saved node, nothing folded and the missing one is a real loss.
+    a, b = _sem("a_tick", "tick.sh", "docs/a.md"), _sem("b_tick", "tick.sh", "docs/a.md")
+    lost = _lost_saved_semantic_nodes([a, b], [a])
+    assert [n["id"] for n in lost] == ["b_tick"]
+
+
+def test_same_file_semantic_fold_two_new_twins_on_one_key_excuse_nothing():
+    # Two located nodes survive on one key (ambiguous), so a third saved node
+    # on that key is not excused.
+    located = [{**_sem(i, "tick.sh", "docs/a.md"), "source_location": "N1"} for i in ("a_tick", "b_tick", "c_tick")]
+    lost = _lost_saved_semantic_nodes(located, located[:2])
+    assert [n["id"] for n in lost] == ["c_tick"]
+
+
 def test_same_file_semantic_fold_needs_a_saved_twin():
     # Like test_non_ast_replacement_is_not_excused: the twin is new in this run,
     # not a saved duplicate going away, so the loss stands.

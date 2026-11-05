@@ -130,7 +130,9 @@ def _lost_saved_semantic_nodes(
         sf = node.get("source_file")
         lbl = str(node.get("label", "")).strip()
         norm_sf = _norm_source_file(sf) if isinstance(sf, str) and sf else None
-        if not norm_sf or not lbl or node.get("id") not in saved_ids:
+        # Pass 1 makes only a located semantic node canonical, so only a located
+        # twin can have absorbed a duplicate.
+        if not norm_sf or not lbl or node.get("id") not in saved_ids or not node.get("source_location"):
             continue
         key = (norm_sf, lbl)
         if key in new_sem_loc_nodes:
