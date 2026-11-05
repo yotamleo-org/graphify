@@ -286,6 +286,48 @@ def test_same_file_semantic_fold_never_excuses_the_raw_path():
     assert [n["id"] for n in lost] == ["old_tick"]
 
 
+def _saved_keyed_pair(tmp_path: Path) -> Path:
+    out = tmp_path / "graph.json"
+    out.write_text(json.dumps({"nodes": [_located("a_tick"), _sem("b_tick", "tick.sh", "docs/notes.md")], "links": []}), encoding="utf-8")
+    return out
+
+
+def test_same_file_semantic_fold_to_json_follows_the_build_dedup_flag(tmp_path, capsys):
+    # extract --no-dedup keeps same-key duplicates, so a missing one is a real
+    # loss; the guard reads the flag build_from_json stamped on the graph.
+    extraction = {"nodes": [_located("a_tick")], "edges": []}
+    out = _saved_keyed_pair(tmp_path)
+    assert to_json(build_from_json(dict(extraction), dedup=False), {}, str(out)) is False
+    assert "b_tick" in capsys.readouterr().err
+    assert to_json(build_from_json(dict(extraction)), {}, str(out)) is True
+
+
+def test_same_file_semantic_fold_to_json_fails_closed_without_the_flag(tmp_path):
+    import networkx as nx
+
+    out = _saved_keyed_pair(tmp_path)
+    G = nx.Graph()
+    G.add_node("a_tick", **{k: v for k, v in _located("a_tick").items() if k != "id"})
+    assert to_json(G, {}, str(out)) is False
+
+
+def test_same_file_semantic_fold_check_shrink_does_not_ask_for_the_excuse(tmp_path, monkeypatch):
+    import graphify.build as build_mod
+
+    seen: list = []
+
+    def spy(*args, **kwargs):
+        seen.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr(build_mod, "_lost_saved_semantic_nodes", spy)
+    _, existing = _saved_graph(tmp_path, _sem("src_models_user_ts_user", "User", "src/models/user.ts"))
+    _check_shrink(force=False, existing_data=existing, new_data=_node_data(build_from_json({"nodes": [], "edges": []})))
+    assert len(seen) == 1
+    args, kwargs = seen[0]
+    assert not kwargs.get("semantic_fold") and len(args) < 5
+
+
 def test_same_file_semantic_fold_needs_a_saved_twin():
     # Like test_non_ast_replacement_is_not_excused: the twin is new in this run,
     # not a saved duplicate going away, so the loss stands.

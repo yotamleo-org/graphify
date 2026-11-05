@@ -126,6 +126,7 @@ def _lost_saved_semantic_nodes(
     deleted_sources: set[str] | None = None,
     folded: dict[str, str] | None = None,
     semantic_fold: bool = False,
+    dedup: bool = True,
 ) -> list[dict]:
     """Saved semantic nodes whose ids are absent from the new graph.
 
@@ -145,7 +146,8 @@ def _lost_saved_semantic_nodes(
     same-file, same-label semantic twin, predicted from the saved nodes by
     ``_label_key_fold``. Only a caller whose new graph came out of
     build_from_json (cluster-only, ``to_json``) sets it; the raw --no-cluster
-    path folds nothing and leaves it off.
+    path folds nothing and leaves it off. ``dedup`` is the flag the new graph was
+    built with (``extract --no-dedup`` keeps same-key duplicates).
     """
     deleted = {
         norm
@@ -216,7 +218,7 @@ def _lost_saved_semantic_nodes(
             norm_sf = _norm_source_file(sf_val) if isinstance(sf_val, str) and sf_val else ""
             fold_items.append((node["id"], {**node, "source_file": norm_sf or ""}))
         fold_items.sort(key=lambda item: item[0])
-        canonical, _ambiguous, ghosts = _label_key_fold(fold_items)
+        canonical, _ambiguous, ghosts = _label_key_fold(fold_items, dedup)
         predicted_ghost = {ghost_id: canonical[key] for key, ghost_id in ghosts.items()}
 
     lost: list[dict] = []
@@ -1660,6 +1662,11 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
                 ]
 
     G: nx.Graph = nx.DiGraph() if directed else nx.Graph()
+    # to_json hands this to the overwrite guard, which predicts the ghost merge
+    # below with it (HIMMEL-9232). A plain attribute, not G.graph: node_link_data
+    # copies G.graph, so watch's topology compare would see it and never match
+    # the saved graph. G.copy() drops it, which makes the guard fail closed.
+    G._graphify_dedup = dedup
     for node in extraction.get("nodes", []):
         # Skip dict nodes with a missing or non-hashable id (e.g. a list emitted
         # by a buggy LLM extraction) so NetworkX add_node never raises

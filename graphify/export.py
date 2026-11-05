@@ -288,6 +288,9 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
     # Drop #3774 accounting before any write. Extract pops these first; every
     # other caller of to_json (the documented build_merge persist path) does not.
     from graphify.build import take_shrink_accounting
+    # build_from_json's dedup flag, for the overwrite guard below (HIMMEL-9232).
+    # Absent (a hand-built graph) means the fold cannot be predicted: fail closed.
+    _built_dedup = getattr(G, "_graphify_dedup", None)
     take_shrink_accounting(G)
     # Safety check: refuse to silently shrink an existing graph (#479)
     existing_path = Path(output_path)
@@ -342,7 +345,8 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
             ]
             folded: dict[str, str] = {}
             missing = _lost_saved_semantic_nodes(
-                existing_nodes, new_node_list, set(), folded, semantic_fold=True
+                existing_nodes, new_node_list, set(), folded,
+                semantic_fold=_built_dedup is not None, dedup=bool(_built_dedup),
             )
             if missing:
                 import sys as _sys
