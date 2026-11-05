@@ -216,3 +216,135 @@ def test_to_json_new_twin_does_not_offset_another_loss(tmp_path, capsys):
     G = build_from_json({"nodes": [_ast_file("src_config", "src/config.php")], "edges": []})
     assert to_json(G, {}, str(out)) is False
     assert "new graph has 1 nodes" in capsys.readouterr().err
+
+
+# --- a saved semantic node folded into a same-file, same-label semantic twin (HIMMEL-9232) ---
+
+
+def _saved_twin_graph(tmp_path: Path) -> Path:
+    # A note that lists renamed ids makes the extractor emit an old path id next
+    # to its file-scoped twin: both saved, one node after the reload.
+    out = tmp_path / "graph.json"
+    out.write_text(json.dumps({"nodes": [
+        _sem("scripts_tick", "tick.sh", "docs/renamed.md"),
+        {**_sem("docs_renamed_md_tick_sh", "tick.sh", "docs/renamed.md"), "source_location": "N17"},
+        _sem("docs_renamed_md_other", "other", "docs/renamed.md"),
+    ], "links": []}), encoding="utf-8")
+    return out
+
+
+def test_same_file_semantic_fold_is_not_lost():
+    twin = {**_sem("new_tick", "tick.sh", "docs/notes.md"), "source_location": "N1"}
+    saved = [_sem("old_tick", "tick.sh", "docs/notes.md"), twin]
+    folded: dict[str, str] = {}
+    assert _lost_saved_semantic_nodes(saved, [twin], None, folded, semantic_fold=True) == []
+    assert folded == {"old_tick": "new_tick"}
+
+
+def _located(node_id: str, loc: str = "N1", label: str = "tick.sh") -> dict:
+    return {**_sem(node_id, label, "docs/notes.md"), "source_location": loc}
+
+
+def test_same_file_semantic_fold_needs_a_located_twin():
+    # Pass 1 makes only a located semantic node canonical: with no location on
+    # either saved node, nothing folded and the missing one is a real loss.
+    a, b = _sem("a_tick", "tick.sh", "docs/notes.md"), _sem("b_tick", "tick.sh", "docs/notes.md")
+    lost = _lost_saved_semantic_nodes([a, b], [a], semantic_fold=True)
+    assert [n["id"] for n in lost] == ["b_tick"]
+
+
+def test_same_file_semantic_fold_follows_sort_order():
+    # The canonical is the first located id in sorted order, so a_tick survives
+    # the fold and b_tick is the ghost. Losing the canonical is a real loss.
+    a, b = _located("a_tick", "N1"), _located("b_tick", "N2")
+    assert _lost_saved_semantic_nodes([a, b], [a], semantic_fold=True) == []
+    lost = _lost_saved_semantic_nodes([a, b], [b], semantic_fold=True)
+    assert [n["id"] for n in lost] == ["a_tick"]
+
+
+def test_same_file_semantic_fold_skips_a_key_with_two_ast_nodes():
+    # Pass 2 leaves a key shared by 2+ AST nodes alone, so nothing folded there.
+    ast_1, ast_2 = _ast("ast_1", "tick.sh", "docs/notes.md"), _ast("ast_2", "tick.sh", "docs/notes.md")
+    twin, ghost = _located("y_tick"), _sem("z_tick", "tick.sh", "docs/notes.md")
+    lost = _lost_saved_semantic_nodes([ast_1, ast_2, twin, ghost], [ast_1, ast_2, twin], semantic_fold=True)
+    assert [n["id"] for n in lost] == ["z_tick"]
+
+
+def test_same_file_semantic_fold_removes_one_ghost_per_key():
+    # Pass 2 keeps one ghost per key: with a_tick canonical, only c_tick (the last
+    # in sorted order) goes. b_tick missing as well is a second, real loss.
+    a, b, c = _located("a_tick"), _sem("b_tick", "tick.sh", "docs/notes.md"), _sem("c_tick", "tick.sh", "docs/notes.md")
+    assert _lost_saved_semantic_nodes([a, b, c], [a, b], semantic_fold=True) == []
+    lost = _lost_saved_semantic_nodes([a, b, c], [a], semantic_fold=True)
+    assert [n["id"] for n in lost] == ["b_tick"]
+
+
+def test_same_file_semantic_fold_never_excuses_the_raw_path():
+    # watch._check_shrink (--no-cluster) never calls build_from_json, so nothing folds.
+    twin = _located("new_tick")
+    lost = _lost_saved_semantic_nodes([_sem("old_tick", "tick.sh", "docs/notes.md"), twin], [twin])
+    assert [n["id"] for n in lost] == ["old_tick"]
+
+
+def _saved_keyed_pair(tmp_path: Path) -> Path:
+    out = tmp_path / "graph.json"
+    out.write_text(json.dumps({"nodes": [_located("a_tick"), _sem("b_tick", "tick.sh", "docs/notes.md")], "links": []}), encoding="utf-8")
+    return out
+
+
+def test_same_file_semantic_fold_to_json_follows_the_build_dedup_flag(tmp_path, capsys):
+    # extract --no-dedup keeps same-key duplicates, so a missing one is a real
+    # loss; the guard reads the flag build_from_json stamped on the graph.
+    extraction = {"nodes": [_located("a_tick")], "edges": []}
+    out = _saved_keyed_pair(tmp_path)
+    assert to_json(build_from_json(dict(extraction), dedup=False), {}, str(out)) is False
+    assert "b_tick" in capsys.readouterr().err
+    assert to_json(build_from_json(dict(extraction)), {}, str(out)) is True
+
+
+def test_same_file_semantic_fold_to_json_fails_closed_without_the_flag(tmp_path):
+    import networkx as nx
+
+    out = _saved_keyed_pair(tmp_path)
+    G = nx.Graph()
+    G.add_node("a_tick", **{k: v for k, v in _located("a_tick").items() if k != "id"})
+    assert to_json(G, {}, str(out)) is False
+
+
+def test_same_file_semantic_fold_check_shrink_does_not_ask_for_the_excuse(tmp_path, monkeypatch):
+    import graphify.build as build_mod
+
+    seen: list = []
+
+    def spy(*args, **kwargs):
+        seen.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr(build_mod, "_lost_saved_semantic_nodes", spy)
+    _, existing = _saved_graph(tmp_path, _sem("src_models_user_ts_user", "User", "src/models/user.ts"))
+    _check_shrink(force=False, existing_data=existing, new_data=_node_data(build_from_json({"nodes": [], "edges": []})))
+    assert len(seen) == 1
+    args, kwargs = seen[0]
+    assert not kwargs.get("semantic_fold") and len(args) < 5
+
+
+def test_same_file_semantic_fold_needs_a_saved_twin():
+    # Like test_non_ast_replacement_is_not_excused: the twin is new in this run,
+    # not a saved duplicate going away, so the loss stands.
+    saved = [_sem("old_tick", "tick.sh", "docs/notes.md")]
+    lost = _lost_saved_semantic_nodes(saved, [_located("new_tick")], semantic_fold=True)
+    assert [n["id"] for n in lost] == ["old_tick"]
+
+
+def test_same_file_semantic_fold_to_json_writes_reload(tmp_path):
+    out = _saved_twin_graph(tmp_path)
+    G = build_from_json(json.loads(out.read_text(encoding="utf-8")))
+    assert G.number_of_nodes() == 2  # the twins folded on reload
+    assert to_json(G, {}, str(out)) is True
+
+
+def test_same_file_semantic_fold_still_refuses_genuine_loss(tmp_path, capsys):
+    out = _saved_twin_graph(tmp_path)
+    G = build_from_json({"nodes": [_sem("docs_renamed_md_tick_sh", "tick.sh", "docs/renamed.md")], "edges": []})
+    assert to_json(G, {}, str(out)) is False
+    assert "docs_renamed_md_other" in capsys.readouterr().err
