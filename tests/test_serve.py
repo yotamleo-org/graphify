@@ -2206,6 +2206,30 @@ def test_query_graph_text_forward_include_rationale():
     assert "WHY Central auth gateway" in out_rat
 
 
+def _mcp_list_tools(server):
+    """tools/list through the Server's registered handler, on mcp 1.x and 2.x."""
+    import asyncio
+    import mcp.types as types
+
+    if hasattr(server, "request_handlers"):  # mcp 1.x
+        res = asyncio.run(server.request_handlers[types.ListToolsRequest](types.ListToolsRequest())).root
+    else:  # mcp 2.x: handlers live behind get_request_handler as (ctx, params) callbacks
+        res = asyncio.run(server.get_request_handler("tools/list").handler(None, types.PaginatedRequestParams()))
+    return res.tools
+
+
+def _mcp_call_tool(server, name, arguments):
+    """tools/call through the Server's registered handler, on mcp 1.x and 2.x."""
+    import asyncio
+    import mcp.types as types
+
+    if hasattr(server, "request_handlers"):  # mcp 1.x
+        req = types.CallToolRequest(params=types.CallToolRequestParams(name=name, arguments=arguments))
+        return asyncio.run(server.request_handlers[types.CallToolRequest](req)).root
+    entry = server.get_request_handler("tools/call")
+    return asyncio.run(entry.handler(None, types.CallToolRequestParams(name=name, arguments=arguments)))
+
+
 def test_tool_get_node_and_query_graph_mcp(tmp_path):
     import asyncio
     import mcp.types as types
@@ -2228,68 +2252,33 @@ def test_tool_get_node_and_query_graph_mcp(tmp_path):
     server = _build_server(str(gp))
 
     # Test list_tools schema
-    list_handler = server.request_handlers[types.ListToolsRequest]
-    tools_res = asyncio.run(list_handler(types.ListToolsRequest()))
-    tools_by_name = {t.name: t for t in tools_res.root.tools}
+    tools_by_name = {t.name: t for t in _mcp_list_tools(server)}
 
-    assert "include_rationale" in tools_by_name["query_graph"].inputSchema["properties"]
-    assert "include_rationale" in tools_by_name["get_node"].inputSchema["properties"]
+    # mcp 1.x names the field inputSchema, mcp 2.x input_schema.
+    def _schema(tool):
+        return getattr(tool, "inputSchema", None) or tool.input_schema
+
+    assert "include_rationale" in _schema(tools_by_name["query_graph"])["properties"]
+    assert "include_rationale" in _schema(tools_by_name["get_node"])["properties"]
 
     # Test call_tool get_node without rationale (default)
-    call_handler = server.request_handlers[types.CallToolRequest]
-    res_no_rat = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="get_node",
-                    arguments={"label": "AuthService", "include_rationale": False},
-                )
-            )
-        )
-    )
-    text_no_rat = res_no_rat.root.content[0].text
+    res_no_rat = _mcp_call_tool(server, "get_node", {"label": "AuthService", "include_rationale": False})
+    text_no_rat = res_no_rat.content[0].text
     assert "Rationale:" not in text_no_rat
 
     # Test call_tool get_node with rationale
-    res_rat = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="get_node",
-                    arguments={"label": "AuthService", "include_rationale": True},
-                )
-            )
-        )
-    )
-    text_rat = res_rat.root.content[0].text
+    res_rat = _mcp_call_tool(server, "get_node", {"label": "AuthService", "include_rationale": True})
+    text_rat = res_rat.content[0].text
     assert "  Rationale: Decision: OAuth2 compliance.\n\n    WHY: Standard protocol." in text_rat
 
     # Test call_tool query_graph without rationale
-    q_no_rat = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="query_graph",
-                    arguments={"question": "AuthService", "include_rationale": False},
-                )
-            )
-        )
-    )
-    q_text_no_rat = q_no_rat.root.content[0].text
+    q_no_rat = _mcp_call_tool(server, "query_graph", {"question": "AuthService", "include_rationale": False})
+    q_text_no_rat = q_no_rat.content[0].text
     assert "WHY" not in q_text_no_rat
 
     # Test call_tool query_graph with rationale
-    q_rat = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="query_graph",
-                    arguments={"question": "AuthService", "include_rationale": True},
-                )
-            )
-        )
-    )
-    q_text_rat = q_rat.root.content[0].text
+    q_rat = _mcp_call_tool(server, "query_graph", {"question": "AuthService", "include_rationale": True})
+    q_text_rat = q_rat.content[0].text
     assert "WHY Decision: OAuth2 compliance. WHY: Standard protocol." in q_text_rat
 
 
@@ -2317,20 +2306,9 @@ def test_mcp_backward_compatibility_omitted_include_rationale(tmp_path):
     to_json(G, {1: ["auth_service"]}, str(gp))
 
     server = _build_server(str(gp))
-    call_handler = server.request_handlers[types.CallToolRequest]
-
     # Call get_node with ONLY {"label": "AuthService"}
-    res = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="get_node",
-                    arguments={"label": "AuthService"},
-                )
-            )
-        )
-    )
-    text = res.root.content[0].text
+    res = _mcp_call_tool(server, "get_node", {"label": "AuthService"})
+    text = res.content[0].text
     assert "Rationale:" not in text
     expected_lines = [
         "Node: AuthService",
@@ -2343,17 +2321,8 @@ def test_mcp_backward_compatibility_omitted_include_rationale(tmp_path):
     assert text == "\n".join(expected_lines)
 
     # Call query_graph with ONLY {"question": "AuthService"}
-    q_res = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="query_graph",
-                    arguments={"question": "AuthService"},
-                )
-            )
-        )
-    )
-    q_text = q_res.root.content[0].text
+    q_res = _mcp_call_tool(server, "query_graph", {"question": "AuthService"})
+    q_text = q_res.content[0].text
     assert "WHY" not in q_text
     assert "NODE AuthService [src=auth.py loc=L10 community=1]" in q_text
 
@@ -2379,117 +2348,34 @@ def test_mcp_strict_boolean_include_rationale(tmp_path):
     to_json(G, {1: ["auth_service"]}, str(gp))
 
     server = _build_server(str(gp))
-    call_handler = server.request_handlers[types.CallToolRequest]
-
     # 1. String "false"
-    res_get_str_false = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="get_node",
-                    arguments={"label": "AuthService", "include_rationale": "false"},
-                )
-            )
-        )
-    )
-    assert "Rationale:" not in res_get_str_false.root.content[0].text
+    res_get_str_false = _mcp_call_tool(server, "get_node", {"label": "AuthService", "include_rationale": "false"})
+    assert "Rationale:" not in res_get_str_false.content[0].text
 
-    res_q_str_false = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="query_graph",
-                    arguments={"question": "AuthService", "include_rationale": "false"},
-                )
-            )
-        )
-    )
-    assert "WHY" not in res_q_str_false.root.content[0].text
+    res_q_str_false = _mcp_call_tool(server, "query_graph", {"question": "AuthService", "include_rationale": "false"})
+    assert "WHY" not in res_q_str_false.content[0].text
 
     # 2. String "true"
-    res_get_str_true = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="get_node",
-                    arguments={"label": "AuthService", "include_rationale": "true"},
-                )
-            )
-        )
-    )
-    assert "Rationale:" not in res_get_str_true.root.content[0].text
+    res_get_str_true = _mcp_call_tool(server, "get_node", {"label": "AuthService", "include_rationale": "true"})
+    assert "Rationale:" not in res_get_str_true.content[0].text
 
-    res_q_str_true = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="query_graph",
-                    arguments={"question": "AuthService", "include_rationale": "true"},
-                )
-            )
-        )
-    )
-    assert "WHY" not in res_q_str_true.root.content[0].text
+    res_q_str_true = _mcp_call_tool(server, "query_graph", {"question": "AuthService", "include_rationale": "true"})
+    assert "WHY" not in res_q_str_true.content[0].text
 
     # 3. None / integer truthy
-    res_get_int = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="get_node",
-                    arguments={"label": "AuthService", "include_rationale": 1},
-                )
-            )
-        )
-    )
-    assert "Rationale:" not in res_get_int.root.content[0].text
+    res_get_int = _mcp_call_tool(server, "get_node", {"label": "AuthService", "include_rationale": 1})
+    assert "Rationale:" not in res_get_int.content[0].text
 
     # 4. Actual True
-    res_get_true = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="get_node",
-                    arguments={"label": "AuthService", "include_rationale": True},
-                )
-            )
-        )
-    )
-    assert "  Rationale: Decision: OAuth2 compliance.\n\n    WHY: Standard protocol." in res_get_true.root.content[0].text
+    res_get_true = _mcp_call_tool(server, "get_node", {"label": "AuthService", "include_rationale": True})
+    assert "  Rationale: Decision: OAuth2 compliance.\n\n    WHY: Standard protocol." in res_get_true.content[0].text
 
-    res_q_true = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="query_graph",
-                    arguments={"question": "AuthService", "include_rationale": True},
-                )
-            )
-        )
-    )
-    assert "WHY Decision: OAuth2 compliance. WHY: Standard protocol." in res_q_true.root.content[0].text
+    res_q_true = _mcp_call_tool(server, "query_graph", {"question": "AuthService", "include_rationale": True})
+    assert "WHY Decision: OAuth2 compliance. WHY: Standard protocol." in res_q_true.content[0].text
 
     # 5. Actual False
-    res_get_false = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="get_node",
-                    arguments={"label": "AuthService", "include_rationale": False},
-                )
-            )
-        )
-    )
-    assert "Rationale:" not in res_get_false.root.content[0].text
+    res_get_false = _mcp_call_tool(server, "get_node", {"label": "AuthService", "include_rationale": False})
+    assert "Rationale:" not in res_get_false.content[0].text
 
-    res_q_false = asyncio.run(
-        call_handler(
-            types.CallToolRequest(
-                params=types.CallToolRequestParams(
-                    name="query_graph",
-                    arguments={"question": "AuthService", "include_rationale": False},
-                )
-            )
-        )
-    )
-    assert "WHY" not in res_q_false.root.content[0].text
+    res_q_false = _mcp_call_tool(server, "query_graph", {"question": "AuthService", "include_rationale": False})
+    assert "WHY" not in res_q_false.content[0].text
