@@ -117,6 +117,25 @@ def _lost_saved_semantic_nodes(
         if key in new_ast_loc_nodes:
             ast_loc_collisions.add(key)
         new_ast_loc_nodes[key] = str(node.get("id"))
+    # Pass 2 of build_from_json also folds a semantic node into a same-file,
+    # same-label semantic twin (HIMMEL-9232). Only a twin the saved graph already
+    # held counts: that is a saved duplicate going away, not a new node standing
+    # in for a lost one. Two new nodes on one key are ambiguous and excuse nothing.
+    saved_ids = {node.get("id") for node in saved_nodes if isinstance(node, dict)}
+    new_sem_loc_nodes: dict[tuple[str, str], str] = {}
+    sem_loc_collisions: set[tuple[str, str]] = set()
+    for node in new_nodes:
+        if not isinstance(node, dict) or node.get("_origin") == "ast":
+            continue
+        sf = node.get("source_file")
+        lbl = str(node.get("label", "")).strip()
+        norm_sf = _norm_source_file(sf) if isinstance(sf, str) and sf else None
+        if not norm_sf or not lbl or node.get("id") not in saved_ids:
+            continue
+        key = (norm_sf, lbl)
+        if key in new_sem_loc_nodes:
+            sem_loc_collisions.add(key)
+        new_sem_loc_nodes[key] = str(node.get("id"))
     # cluster-only and build_from_json rewrite a legacy semantic id to its
     # canonical stem, then fold a bare doc id into its `_doc` twin. That id
     # is the same node. A missing rationale id has no such successor.
@@ -153,6 +172,10 @@ def _lost_saved_semantic_nodes(
             if loc_key in new_ast_loc_nodes and loc_key not in ast_loc_collisions:
                 if folded is not None:
                     folded[str(node_id)] = new_ast_loc_nodes[loc_key]
+                continue
+            if loc_key in new_sem_loc_nodes and loc_key not in sem_loc_collisions:
+                if folded is not None:
+                    folded[str(node_id)] = new_sem_loc_nodes[loc_key]
                 continue
         # A document that names a file stamps the file's name as label but its
         # own path as source_file; Pass 2b folds it into the one AST file node

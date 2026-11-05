@@ -216,3 +216,48 @@ def test_to_json_new_twin_does_not_offset_another_loss(tmp_path, capsys):
     G = build_from_json({"nodes": [_ast_file("src_config", "src/config.php")], "edges": []})
     assert to_json(G, {}, str(out)) is False
     assert "new graph has 1 nodes" in capsys.readouterr().err
+
+
+# --- a saved semantic node folded into a same-file, same-label semantic twin (HIMMEL-9232) ---
+
+
+def _saved_twin_graph(tmp_path: Path) -> Path:
+    # A note that lists renamed ids makes the extractor emit an old path id next
+    # to its file-scoped twin: both saved, one node after the reload.
+    out = tmp_path / "graph.json"
+    out.write_text(json.dumps({"nodes": [
+        _sem("scripts_tick", "tick.sh", "docs/renamed.md"),
+        {**_sem("docs_renamed_md_tick_sh", "tick.sh", "docs/renamed.md"), "source_location": "N17"},
+        _sem("docs_renamed_md_other", "other", "docs/renamed.md"),
+    ], "links": []}), encoding="utf-8")
+    return out
+
+
+def test_same_file_semantic_fold_is_not_lost():
+    twin = {**_sem("new_tick", "tick.sh", "docs/a.md"), "source_location": "N1"}
+    saved = [_sem("old_tick", "tick.sh", "docs/a.md"), twin]
+    folded: dict[str, str] = {}
+    assert _lost_saved_semantic_nodes(saved, [twin], None, folded) == []
+    assert folded == {"old_tick": "new_tick"}
+
+
+def test_same_file_semantic_fold_needs_a_saved_twin():
+    # Like test_non_ast_replacement_is_not_excused: the twin is new in this run,
+    # not a saved duplicate going away, so the loss stands.
+    saved = [_sem("old_tick", "tick.sh", "docs/a.md")]
+    lost = _lost_saved_semantic_nodes(saved, [_sem("new_tick", "tick.sh", "docs/a.md")])
+    assert [n["id"] for n in lost] == ["old_tick"]
+
+
+def test_same_file_semantic_fold_to_json_writes_reload(tmp_path):
+    out = _saved_twin_graph(tmp_path)
+    G = build_from_json(json.loads(out.read_text(encoding="utf-8")))
+    assert G.number_of_nodes() == 2  # the twins folded on reload
+    assert to_json(G, {}, str(out)) is True
+
+
+def test_same_file_semantic_fold_still_refuses_genuine_loss(tmp_path, capsys):
+    out = _saved_twin_graph(tmp_path)
+    G = build_from_json({"nodes": [_sem("docs_renamed_md_tick_sh", "tick.sh", "docs/renamed.md")], "edges": []})
+    assert to_json(G, {}, str(out)) is False
+    assert "docs_renamed_md_other" in capsys.readouterr().err
