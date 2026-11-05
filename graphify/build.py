@@ -66,12 +66,72 @@ def _backfill_origin(item: dict) -> None:
         item.pop("_origin", None)
         return
     item.setdefault("_origin", "ast" if _is_ast_tier(item) else "semantic")
+def _label_key_fold(
+    items: list[tuple[str, dict]], dedup: bool = True
+) -> tuple[dict[tuple[str, str], str], set[tuple[str, str]], dict[tuple[str, str], str]]:
+    """Pass 1 and the key half of Pass 2 of build_from_json's ghost merge.
+
+    ``items`` is ``(id, attrs)`` in sorted id order (the caller sorts, #1753).
+    Returns ``(canonical, ambiguous, ghost)``, each keyed on ``(source_file,
+    label)``: the canonical node id, the keys shared by 2+ AST nodes (Pass 2
+    skips them, #1257), and the ONE ghost id per key that Pass 2 removes (the
+    last non-canonical non-AST id in sorted order). The overwrite guard calls
+    this on the saved nodes to predict the same fold (HIMMEL-9232).
+
+    Strict ``_origin`` check on purpose, NOT _is_ast_tier (#2334): existing graph
+    items are backfilled with ``_origin`` at load time, so inside a build the only
+    unstamped items are fresh SEMANTIC chunks. Only a node with a
+    ``source_location`` (or an AST node) can be canonical; AST always overwrites a
+    non-AST entry, and the first located non-AST node for a key wins. The key is
+    the FULL normalized source_file (#2068).
+    """
+    by_id = dict(items)
+    canonical: dict[tuple[str, str], str] = {}
+    ambiguous: set[tuple[str, str]] = set()
+    ghost: dict[tuple[str, str], str] = {}
+    for nid, attrs in items:
+        label = str(attrs.get("label", "")).strip()
+        sf = str(attrs.get("source_file", ""))
+        if not label or not sf:
+            continue
+        is_ast = attrs.get("_origin") == "ast"
+        if not (attrs.get("source_location") or is_ast):
+            continue
+        key = (sf, label)
+        if is_ast:
+            if key in canonical and by_id[canonical[key]].get("_origin") == "ast":
+                ambiguous.add(key)
+            canonical[key] = nid
+        else:
+            canonical.setdefault(key, nid)
+    for nid, attrs in items:
+        if attrs.get("_origin") == "ast":
+            continue
+        label = str(attrs.get("label", "")).strip()
+        sf = str(attrs.get("source_file", ""))
+        if not label or not sf:
+            continue
+        key = (sf, label)
+        if key in ambiguous or key not in canonical or canonical[key] == nid:
+            continue
+        if not dedup and by_id[canonical[key]].get("_origin") != "ast":
+            continue
+        # #4896: an independent semantic explanation is not a disposable twin
+        # even when it names the SAME physical source file.
+        if _has_independent_semantic_evidence(attrs):
+            continue
+        ghost[key] = nid
+    return canonical, ambiguous, ghost
+
+
 def _lost_saved_semantic_nodes(
     saved_nodes: list,
     new_nodes: list,
     deleted_sources: set[str] | None = None,
     folded: dict[str, str] | None = None,
     dedup_remap: dict[str, str] | None = None,
+    semantic_fold: bool = False,
+    dedup: bool = True,
 ) -> list[dict]:
     """Saved semantic nodes whose ids are absent from the new graph.
 
@@ -91,6 +151,13 @@ def _lost_saved_semantic_nodes(
     produced this run (#4940). A saved id it folded into a survivor that is in
     the new graph is one node, not a lost one. A survivor that is itself gone
     excuses nothing: the content went with it.
+
+    ``semantic_fold`` also excuses a saved node that Pass 2 folds into a
+    same-file, same-label semantic twin, predicted from the saved nodes by
+    ``_label_key_fold``. Only a caller whose new graph came out of
+    build_from_json (cluster-only, ``to_json``) sets it; the raw --no-cluster
+    path folds nothing and leaves it off. ``dedup`` is the flag the new graph was
+    built with (``extract --no-dedup`` keeps same-key duplicates).
     """
     deleted = {
         norm
@@ -135,10 +202,34 @@ def _lost_saved_semantic_nodes(
     ]
     doc_remap = _doc_twin_remap(rewritten)
 
-    def _renamed_present(node_id: str) -> bool:
+    def _renamed(node_id: str) -> str:
         renamed = stem_remap.get(node_id, node_id)
-        renamed = doc_remap.get(renamed, renamed)
-        return renamed in new_ids
+        return doc_remap.get(renamed, renamed)
+
+    def _renamed_present(node_id: str) -> bool:
+        return _renamed(node_id) in new_ids
+
+    # build_from_json Pass 2 also folds a semantic ghost into a same-file,
+    # same-label semantic twin (HIMMEL-9232). Predict that fold from the SAVED
+    # nodes with the pass's own rules (_label_key_fold): one ghost per key, the
+    # canonical being the first located id in sorted order, an AST-ambiguous key
+    # folding nothing. Only a cluster/rebuild path folds; the raw --no-cluster
+    # path (watch._check_shrink) never calls build_from_json, so it passes
+    # semantic_fold=False and nothing is excused.
+    predicted_ghost: dict[str, str] = {}
+    if semantic_fold:
+        fold_items: list[tuple[str, dict]] = []
+        for node in rewritten:
+            if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+                continue
+            if node["id"] in doc_remap:
+                continue
+            sf_val = node.get("source_file")
+            norm_sf = _norm_source_file(sf_val) if isinstance(sf_val, str) and sf_val else ""
+            fold_items.append((node["id"], {**node, "source_file": norm_sf or ""}))
+        fold_items.sort(key=lambda item: item[0])
+        canonical, _ambiguous, ghosts = _label_key_fold(fold_items, dedup)
+        predicted_ghost = {ghost_id: canonical[key] for key, ghost_id in ghosts.items()}
 
     lost: list[dict] = []
     for node in saved_nodes:
@@ -167,6 +258,12 @@ def _lost_saved_semantic_nodes(
             ):
                 if folded is not None:
                     folded[str(node_id)] = new_ast_loc_nodes[loc_key]
+                continue
+        if semantic_fold and isinstance(node_id, str):
+            twin = predicted_ghost.get(_renamed(node_id))
+            if twin is not None and twin in new_ids:
+                if folded is not None:
+                    folded[node_id] = twin
                 continue
         # Full-code rebuilds can relabel an AST file node with a path-qualified
         # suffix when several files share a basename. The exact (source_file,
@@ -1688,6 +1785,11 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
                 ]
 
     G: nx.Graph = nx.DiGraph() if directed else nx.Graph()
+    # to_json hands this to the overwrite guard, which predicts the ghost merge
+    # below with it (HIMMEL-9232). A plain attribute, not G.graph: node_link_data
+    # copies G.graph, so watch's topology compare would see it and never match
+    # the saved graph. G.copy() drops it, which makes the guard fail closed.
+    G._graphify_dedup = dedup
     for node in extraction.get("nodes", []):
         # Skip dict nodes with a missing or non-hashable id (e.g. a list emitted
         # by a buggy LLM extraction) so NetworkX add_node never raises
@@ -1725,84 +1827,55 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
     # populates source_location, so those ghosts survived. Extended fix: use
     # _origin=="ast" as the canonical signal. AST nodes always win; any non-AST
     # node sharing (basename, label) with an AST node is a ghost.
-    _loc_nodes: dict[tuple[str, str], str] = {}   # (source_file, label) -> canonical node id
-    _loc_collisions: set[tuple[str, str]] = set()  # keys shared by 2+ AST nodes
-    _noloc_nodes: dict[tuple[str, str], str] = {}  # (source_file, label) -> ghost node id
+    # (source_file, label) -> canonical node id / ambiguous keys / ghost node id.
+    # Pass 1 and the first half of Pass 2 live in _label_key_fold so the
+    # overwrite guard predicts the same fold (HIMMEL-9232).
+    _loc_nodes, _loc_collisions, _noloc_nodes = _label_key_fold(
+        [(nid, G.nodes[nid]) for nid in sorted(node_set)], dedup
+    )
     _ast_file_nodes: list[tuple[str, str]] = []  # (node_id, source_file) for AST file-self nodes (#3344)
     _ast_method_nodes: dict[tuple[str, str], list[str]] = {}  # (source_file, norm_method) -> [ast_nid, ...]
     from graphify.extractors.csharp import bare_csharp_method_label
 
-    # Pass 1: collect canonical nodes — AST-origin nodes take precedence over LLM nodes.
-    # When 2+ AST nodes share a key (same-named symbols in same-named files across
-    # directories, e.g. render in two index.ts), the key is ambiguous: merging a
-    # ghost would pick an arbitrary winner via set-iteration order (#1257). Track
-    # those keys so Pass 2 skips them — same conservatism as
-    # _rewire_unique_stub_nodes, which only merges when exactly one real def exists.
-    # Iterate in a deterministic (sorted) order, not set-iteration order, so the
-    # canonical winner and the ambiguity decisions below don't flip run-to-run
-    # with CPython's per-process string-hash seed (#1753) — the same reason the
-    # edge-iteration loop further down sorts on purpose.
+    # Pass 1 (canonical nodes) is in _label_key_fold above; this loop keeps the
+    # AST-only bookkeeping, in the same sorted order (#1753).
     for nid in sorted(node_set):
         attrs = G.nodes[nid]
         label = str(attrs.get("label", "")).strip()
         sf = str(attrs.get("source_file", ""))
         if not label or not sf:
             continue
-        # Strict _origin check on purpose — NOT _is_ast_tier (#2334): existing
-        # graph items are backfilled with _origin at load time, so inside a
-        # build the only unstamped items are fresh SEMANTIC chunks (extract()
-        # always stamps AST output). Those may carry drifted 'L<line>'
-        # source_locations (the very ghosts #1145-extended collapses), and the
-        # shape fallback would misread them as AST — turning two same-file LLM
-        # duplicates into a fake AST/AST collision that blocks their merge.
-        is_ast = attrs.get("_origin") == "ast"
-        if attrs.get("source_location") or is_ast:
-            # Key on the FULL normalized source_file, not the bare basename
-            # (#2068): the AST/LLM ghost twins of #1145 always share the same
-            # source_file (different ids, same file), so full-path keying still
-            # collapses them, while unrelated same-basename nodes in DIFFERENT
-            # directories (docs/a/index.md vs docs/b/index.md) now get distinct
-            # keys and are never falsely merged. This subsumes the #1753/#1257
-            # cross-file ambiguity guard, which is why the non-AST branch below
-            # no longer needs it.
-            key = (sf, label)
-            if is_ast:
-                # Two AST nodes on the same key (same file, same label) is an
-                # ambiguous collision.
-                if key in _loc_nodes and G.nodes[_loc_nodes[key]].get("_origin") == "ast":
-                    _loc_collisions.add(key)
-                # AST-origin nodes always overwrite a prior non-AST entry.
-                _loc_nodes[key] = nid
-                # #3344: a self-referential semantic pass (e.g. re-extracting a
-                # saved graphify-out/memory/*.md query answer) mints a NEW
-                # non-AST node for every bare file path/basename it mentions in
-                # prose ("App.tsx", "customer-app/index.ts"), stamped with
-                # source_file = the memory doc being read, NOT the file named in
-                # the prose. That wrong source_file means such a ghost can never
-                # hit the (sf, label) key above — same underlying bug as #1145,
-                # just with the (source_file, label) *pair* broken instead of
-                # only the id. Record every AST node whose own label already
-                # names its own file (_is_file_node_label — the same "is this a
-                # file node" predicate the label-disambiguation pass uses) so
-                # Pass 2b below can catch these by label alone.
-                if _is_file_node_label(label, sf):
-                    _ast_file_nodes.append((nid, sf))
-                # Only a method-shaped label (`.name()`) is a method-ghost
-                # candidate — gate on BOTH the leading dot and the `()` suffix so
-                # a dotfile label like `.env` is never mistaken for a method
-                # (#3705 follow-up). Key on the normalized name for parity with
-                # the alias index below and the rest of the dedup passes.
-                m_label = bare_csharp_method_label(label, sf) or label
-                if m_label.startswith(".") and m_label.endswith("()"):
-                    m_name = make_id(m_label.removeprefix(".").removesuffix("()"))
-                    _ast_method_nodes.setdefault((sf, m_name), []).append(nid)
-            else:
-                # First non-AST node for this (file, label) wins as canonical; a
-                # later same-key node is a genuine same-file duplicate and still
-                # collapses in Pass 2.
-                _loc_nodes.setdefault(key, nid)
+        # Strict _origin check on purpose — NOT _is_ast_tier (#2334); see
+        # _label_key_fold.
+        if attrs.get("_origin") != "ast":
+            continue
+        # #3344: a self-referential semantic pass (e.g. re-extracting a
+        # saved graphify-out/memory/*.md query answer) mints a NEW
+        # non-AST node for every bare file path/basename it mentions in
+        # prose ("App.tsx", "customer-app/index.ts"), stamped with
+        # source_file = the memory doc being read, NOT the file named in
+        # the prose. That wrong source_file means such a ghost can never
+        # hit the (sf, label) key above — same underlying bug as #1145,
+        # just with the (source_file, label) *pair* broken instead of
+        # only the id. Record every AST node whose own label already
+        # names its own file (_is_file_node_label — the same "is this a
+        # file node" predicate the label-disambiguation pass uses) so
+        # Pass 2b below can catch these by label alone.
+        if _is_file_node_label(label, sf):
+            _ast_file_nodes.append((nid, sf))
+        # Only a method-shaped label (`.name()`) is a method-ghost
+        # candidate — gate on BOTH the leading dot and the `()` suffix so
+        # a dotfile label like `.env` is never mistaken for a method
+        # (#3705 follow-up). Key on the normalized name for parity with
+        # the alias index below and the rest of the dedup passes.
+        m_label = bare_csharp_method_label(label, sf) or label
+        if m_label.startswith(".") and m_label.endswith("()"):
+            m_name = make_id(m_label.removeprefix(".").removesuffix("()"))
+            _ast_method_nodes.setdefault((sf, m_name), []).append(nid)
 
-    # Pass 2: find ghosts — non-AST nodes that have an AST canonical twin.
+    # Pass 2: find ghosts — non-AST nodes that have an AST canonical twin. The
+    # key-based half is in _label_key_fold (_noloc_nodes); this loop keeps the
+    # method-ghost half.
     _ghost_remap: dict[str, str] = {}  # ghost_id -> canonical_id
     for nid in sorted(node_set):
         attrs = G.nodes[nid]
@@ -1815,16 +1888,7 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         key = (sf, label)
         if key in _loc_collisions:
             continue  # ambiguous key: no safe canonical winner, leave ghost intact
-        if key in _loc_nodes and _loc_nodes[key] != nid:
-            if not dedup and G.nodes[_loc_nodes[key]].get("_origin") != "ast":
-                continue
-            # #4896: an independent semantic explanation is not a disposable
-            # AST twin even when it names the SAME physical source file.
-            # Preserve the original semantic id, rationale and source attribution.
-            if _has_independent_semantic_evidence(attrs):
-                continue
-            _noloc_nodes[key] = nid
-        elif key not in _loc_nodes:
+        if key not in _loc_nodes:
             # Spec-conformant method ghost omitting class segment / leading dot
             # (#3705). Normalize the same way the index was built so raw-label
             # casing/punctuation differences still match; remap only on a single

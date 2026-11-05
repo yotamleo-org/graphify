@@ -307,6 +307,9 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
     # The guard below reads it; it is removed here so node_link_data cannot
     # write it into graph.json (#4940).
     dedup_remap = take_dedup_remap(G)
+    # build_from_json's dedup flag, for the overwrite guard below (HIMMEL-9232).
+    # Absent (a hand-built graph) means the fold cannot be predicted: fail closed.
+    _built_dedup = getattr(G, "_graphify_dedup", None)
     take_shrink_accounting(G)
     # Safety check: refuse to silently shrink an existing graph (#479)
     existing_path = Path(output_path)
@@ -362,6 +365,7 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
             folded: dict[str, str] = {}
             missing = _lost_saved_semantic_nodes(
                 existing_nodes, new_node_list, set(), folded, dedup_remap=dedup_remap,
+                semantic_fold=_built_dedup is not None, dedup=bool(_built_dedup),
             )
             if missing:
                 import sys as _sys
