@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graphifyy"
-version = "0.9.99+himmel.2"
+version = "0.9.99+himmel.3"
 description = "AI coding assistant skill (Claude Code, CodeBuddy, Codex, OpenCode, Kilo Code, Cursor, Gemini CLI, Aider, OpenClaw, Factory Droid, Trae, Hermes, Kiro, Pi, Devin CLI, Google Antigravity) - turn any folder of code, docs, papers, images, or videos into a queryable knowledge graph"
 readme = "README.md"
 license = "Apache-2.0"
@@ -162,10 +162,12 @@ environments = ["python_full_version >= '3.11' and sys_platform != 'emscripten'"
 constraint-dependencies = [
     "anyio>=4.14.2",
     "certifi>=2026.10.19",
+    "filelock>=4.2.1",
     "fsspec>=2026.6.0",
     "mcp>=1.30.0,<2",
     "pyjwt>=2.15.0",
-    "soupsieve>=2.8.4,<3",
+    "pypdf>=6.21.4",
+    "soupsieve>=2.8.4",
     "urllib3>=2.8.0",
 ]
 # Install via: uv tool install graphifyy
