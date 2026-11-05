@@ -19,7 +19,7 @@ constraints = [
     { name = "certifi", specifier = ">=2026.10.19" },
     { name = "filelock", specifier = ">=4.2.1" },
     { name = "fsspec", specifier = ">=2026.6.0" },
-    { name = "mcp", specifier = ">=1.30.0,<2" },
+    { name = "mcp", specifier = ">=1.30.0,<3" },
     { name = "pyjwt", specifier = ">=2.15.0" },
     { name = "pypdf", specifier = ">=6.21.4" },
     { name = "soupsieve", specifier = ">=2.8.4" },
