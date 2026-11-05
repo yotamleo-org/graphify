@@ -341,7 +341,9 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
                 for node_id, attrs in G.nodes(data=True)
             ]
             folded: dict[str, str] = {}
-            missing = _lost_saved_semantic_nodes(existing_nodes, new_node_list, set(), folded)
+            missing = _lost_saved_semantic_nodes(
+                existing_nodes, new_node_list, set(), folded, semantic_fold=True
+            )
             if missing:
                 import sys as _sys
                 ids = ", ".join(str(node.get("id")) for node in missing)

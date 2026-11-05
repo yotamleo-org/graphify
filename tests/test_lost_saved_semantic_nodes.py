@@ -234,34 +234,63 @@ def _saved_twin_graph(tmp_path: Path) -> Path:
 
 
 def test_same_file_semantic_fold_is_not_lost():
-    twin = {**_sem("new_tick", "tick.sh", "docs/a.md"), "source_location": "N1"}
-    saved = [_sem("old_tick", "tick.sh", "docs/a.md"), twin]
+    twin = {**_sem("new_tick", "tick.sh", "docs/notes.md"), "source_location": "N1"}
+    saved = [_sem("old_tick", "tick.sh", "docs/notes.md"), twin]
     folded: dict[str, str] = {}
-    assert _lost_saved_semantic_nodes(saved, [twin], None, folded) == []
+    assert _lost_saved_semantic_nodes(saved, [twin], None, folded, semantic_fold=True) == []
     assert folded == {"old_tick": "new_tick"}
+
+
+def _located(node_id: str, loc: str = "N1", label: str = "tick.sh") -> dict:
+    return {**_sem(node_id, label, "docs/notes.md"), "source_location": loc}
 
 
 def test_same_file_semantic_fold_needs_a_located_twin():
     # Pass 1 makes only a located semantic node canonical: with no location on
     # either saved node, nothing folded and the missing one is a real loss.
-    a, b = _sem("a_tick", "tick.sh", "docs/a.md"), _sem("b_tick", "tick.sh", "docs/a.md")
-    lost = _lost_saved_semantic_nodes([a, b], [a])
+    a, b = _sem("a_tick", "tick.sh", "docs/notes.md"), _sem("b_tick", "tick.sh", "docs/notes.md")
+    lost = _lost_saved_semantic_nodes([a, b], [a], semantic_fold=True)
     assert [n["id"] for n in lost] == ["b_tick"]
 
 
-def test_same_file_semantic_fold_two_new_twins_on_one_key_excuse_nothing():
-    # Two located nodes survive on one key (ambiguous), so a third saved node
-    # on that key is not excused.
-    located = [{**_sem(i, "tick.sh", "docs/a.md"), "source_location": "N1"} for i in ("a_tick", "b_tick", "c_tick")]
-    lost = _lost_saved_semantic_nodes(located, located[:2])
-    assert [n["id"] for n in lost] == ["c_tick"]
+def test_same_file_semantic_fold_follows_sort_order():
+    # The canonical is the first located id in sorted order, so a_tick survives
+    # the fold and b_tick is the ghost. Losing the canonical is a real loss.
+    a, b = _located("a_tick", "N1"), _located("b_tick", "N2")
+    assert _lost_saved_semantic_nodes([a, b], [a], semantic_fold=True) == []
+    lost = _lost_saved_semantic_nodes([a, b], [b], semantic_fold=True)
+    assert [n["id"] for n in lost] == ["a_tick"]
+
+
+def test_same_file_semantic_fold_skips_a_key_with_two_ast_nodes():
+    # Pass 2 leaves a key shared by 2+ AST nodes alone, so nothing folded there.
+    ast_1, ast_2 = _ast("ast_1", "tick.sh", "docs/notes.md"), _ast("ast_2", "tick.sh", "docs/notes.md")
+    twin, ghost = _located("y_tick"), _sem("z_tick", "tick.sh", "docs/notes.md")
+    lost = _lost_saved_semantic_nodes([ast_1, ast_2, twin, ghost], [ast_1, ast_2, twin], semantic_fold=True)
+    assert [n["id"] for n in lost] == ["z_tick"]
+
+
+def test_same_file_semantic_fold_removes_one_ghost_per_key():
+    # Pass 2 keeps one ghost per key: with a_tick canonical, only c_tick (the last
+    # in sorted order) goes. b_tick missing as well is a second, real loss.
+    a, b, c = _located("a_tick"), _sem("b_tick", "tick.sh", "docs/notes.md"), _sem("c_tick", "tick.sh", "docs/notes.md")
+    assert _lost_saved_semantic_nodes([a, b, c], [a, b], semantic_fold=True) == []
+    lost = _lost_saved_semantic_nodes([a, b, c], [a], semantic_fold=True)
+    assert [n["id"] for n in lost] == ["b_tick"]
+
+
+def test_same_file_semantic_fold_never_excuses_the_raw_path():
+    # watch._check_shrink (--no-cluster) never calls build_from_json, so nothing folds.
+    twin = _located("new_tick")
+    lost = _lost_saved_semantic_nodes([_sem("old_tick", "tick.sh", "docs/notes.md"), twin], [twin])
+    assert [n["id"] for n in lost] == ["old_tick"]
 
 
 def test_same_file_semantic_fold_needs_a_saved_twin():
     # Like test_non_ast_replacement_is_not_excused: the twin is new in this run,
     # not a saved duplicate going away, so the loss stands.
-    saved = [_sem("old_tick", "tick.sh", "docs/a.md")]
-    lost = _lost_saved_semantic_nodes(saved, [_sem("new_tick", "tick.sh", "docs/a.md")])
+    saved = [_sem("old_tick", "tick.sh", "docs/notes.md")]
+    lost = _lost_saved_semantic_nodes(saved, [_located("new_tick")], semantic_fold=True)
     assert [n["id"] for n in lost] == ["old_tick"]
 
 
