@@ -14,7 +14,7 @@ FIRST_FIXED = {
     "pillow": "13.0.0",
     "cryptography": "50.0.0",
     "pypdf": "6.21.4",
-    "soupsieve": "2.8.4",
+    "soupsieve": "4.0.0",
     "filelock": "4.2.1",
 }
 
